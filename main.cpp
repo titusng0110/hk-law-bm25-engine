@@ -150,15 +150,22 @@ int main() {
     if (!infile.is_open() || !outfile.is_open()) return 1;
 
     std::string line;
+    std::string current_english_word;
+
+    std::vector<std::string> tokens;
+    std::vector<std::string> final_tokens;
+    std::vector<std::string> statutory_tokens;
+    tokens.reserve(20000);
+    final_tokens.reserve(20000);
+    statutory_tokens.reserve(20000);
 
     while (std::getline(infile, line)) {
         if (line.empty()) {
             outfile << "[]\n";
             continue;
         }
-
-        std::vector<std::string> tokens;
-        std::string current_english_word;
+        tokens.clear();
+        current_english_word.clear();
 
         // ==========================================
         // PART 2: THE "FLUSH" LAMBDA
@@ -315,7 +322,7 @@ int main() {
         // ==========================================
         // PART 3: PHASE 2 - BRACKET MERGING
         // ==========================================
-        std::vector<std::string> final_tokens;
+        final_tokens.clear();
         for (size_t i = 0; i < tokens.size(); ++i) {
             if (tokens[i] == "(" && !final_tokens.empty() && i + 2 < tokens.size() && tokens[i+2] == ")") {
                 const std::string& prev = final_tokens.back();
@@ -340,7 +347,7 @@ int main() {
         // ==========================================
         // PART 4: PHASE 3 - STATUTORY MERGING
         // ==========================================
-        std::vector<std::string> statutory_tokens;
+        statutory_tokens.clear();
         for (size_t i = 0; i < tokens.size(); ++i) {
             StatKeywordType stat_type = get_statutory_keyword_type(tokens[i]);
 
