@@ -12,6 +12,8 @@
 // External libraries
 #include "utf8.h"             // utf8cpp
 #include "libstemmer.h"       // Snowball C API
+#include "nlohmann/json.hpp"   // JSON for Modern C++
+#include "httplib.h"           // cpp-httplib
 
 // Helper: Check if a codepoint is a digit
 constexpr bool is_digit(char32_t cp) {

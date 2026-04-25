@@ -18,3 +18,7 @@ https://github.com/snowballstem/snowball
 https://snowballstem.org/download.html
 
 https://github.com/igorbrigadir/stopwords/blob/master/en/lexisnexis.txt
+
+https://github.com/nlohmann/json
+
+https://github.com/yhirose/cpp-httplib
