@@ -4,29 +4,34 @@
 #include <vector>
 #include <stdexcept>
 #include <unordered_map>
+#include <array>
+#include <algorithm> // Added for std::sort
 
 // Ensure you have this library in your include path
 #include "nlohmann/json.hpp"
 #include "bm25-tokenizer.hpp"
 
 using json = nlohmann::json;
-using ordered_json = nlohmann::ordered_json; // Added to preserve insertion order
+using ordered_json = nlohmann::ordered_json; // Preserve insertion order
 
 void print_usage(const char* prog_name) {
-    std::cerr << "Usage: " << prog_name << " -i input.jsonl -o output.jsonl\n";
+    std::cerr << "Usage: " << prog_name << " -i input.jsonl -o1 docs.jsonl -o2 index.jsonl\n";
 }
 
 int main(int argc, char* argv[]) {
     std::string input_path;
-    std::string output_path;
+    std::string docs_output_path;
+    std::string index_output_path;
 
     // 1. Parse Command Line Arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-i" && i + 1 < argc) {
             input_path = argv[++i];
-        } else if (arg == "-o" && i + 1 < argc) {
-            output_path = argv[++i];
+        } else if (arg == "-o1" && i + 1 < argc) {
+            docs_output_path = argv[++i];
+        } else if (arg == "-o2" && i + 1 < argc) {
+            index_output_path = argv[++i];
         } else {
             std::cerr << "Unknown or incomplete argument: " << arg << "\n";
             print_usage(argv[0]);
@@ -34,7 +39,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (input_path.empty() || output_path.empty()) {
+    if (input_path.empty() || docs_output_path.empty() || index_output_path.empty()) {
         print_usage(argv[0]);
         return 1;
     }
@@ -46,13 +51,19 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::ofstream outfile(output_path);
-    if (!outfile.is_open()) {
-        std::cerr << "Error: Could not open output file " << output_path << "\n";
+    std::ofstream outfile_docs(docs_output_path);
+    if (!outfile_docs.is_open()) {
+        std::cerr << "Error: Could not open docs output file " << docs_output_path << "\n";
         return 1;
     }
 
-    // 3. Process the JSONL line by line
+    std::ofstream outfile_index(index_output_path);
+    if (!outfile_index.is_open()) {
+        std::cerr << "Error: Could not open index output file " << index_output_path << "\n";
+        return 1;
+    }
+
+    // 3. Process the JSONL chunk
     try {
         // Initialize the tokenizer once
         bm25::Tokenizer tokenizer("lexisnexis_stopwords.txt");
@@ -60,13 +71,14 @@ int main(int argc, char* argv[]) {
         // Keep ONE token vector allocated to reuse capacity
         std::vector<std::pair<std::string, uint32_t>> doc_tokens;
 
-        // Corpus-level variables for the final output line
-        uint32_t N = 0;                                 // Total number of documents
-        uint64_t TCT = 0;                               // Total Corpus Tokens
-        std::unordered_map<std::string, uint64_t> df;   // Document Frequencies
+        // In-memory inverted index for this chunk.
+        // Maps Term -> List of [doc_id, tf].
+        // We use std::array<uint32_t, 2> so nlohmann/json outputs exactly [[id, tf], ...]
+        std::unordered_map<std::string, std::vector<std::array<uint32_t, 2>>> inverted_index;
 
         std::string line;
         size_t line_number = 0;
+        uint32_t N = 0;
 
         while (std::getline(infile, line)) {
             line_number++;
@@ -88,37 +100,28 @@ int main(int argc, char* argv[]) {
                 // Tokenize
                 tokenizer.tokenize(text, doc_tokens);
 
-                // Process tokens to create the TF dictionary, calculate D, and update global df
-                json tf_obj = json::object();
                 uint32_t D = 0; // Document length
 
+                // Process tokens to calculate D and update the inverted index
                 for (const auto& tf_pair : doc_tokens) {
                     const std::string& term = tf_pair.first;
-                    int term_freq = tf_pair.second;
-
-                    tf_obj[term] = term_freq;
+                    uint32_t term_freq = tf_pair.second;
 
                     // Add term frequencies to the document length
                     D += term_freq;
 
-                    // Increment the global Document Frequency for this term
-                    df[term]++;
+                    // Push [doc_id, tf] directly to the inverted index postings list
+                    inverted_index[term].push_back({doc_id, term_freq});
                 }
 
-                // Build output JSON object using ordered_json to preserve key order
-                ordered_json j_out;
+                // Build and write out the docs.jsonl JSON object
+                ordered_json j_out_docs;
+                j_out_docs["id"] = doc_id;
+                j_out_docs["D"] = D;
+                j_out_docs["text"] = text;
 
-                // Insert exactly in the requested order: id, D, tf, text
-                j_out["id"] = doc_id;
-                j_out["D"] = D;
-                j_out["tf"] = tf_obj; // Note: change this key to "tf" if you prefer
-                j_out["text"] = text;
+                outfile_docs << j_out_docs.dump() << '\n';
 
-                // Write out the serialized JSON object as a single line
-                outfile << j_out.dump() << '\n';
-
-                // Update corpus-level statistics
-                TCT += D;
                 N++;
 
             } catch (const json::exception& e) {
@@ -126,15 +129,35 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // 4. Write the final line with Corpus Statistics
-        ordered_json j_stats;
-        j_stats["N"] = N;
-        j_stats["TCT"] = TCT;
-        j_stats["df"] = df; // nlohmann/json automatically converts unordered_map to a JSON dictionary
+        // 4. Sort and Dump the inverted index to index.jsonl
 
-        outfile << j_stats.dump() << '\n';
+        // Extract pointers to the keys (terms) to avoid making string copies
+        std::vector<const std::string*> sorted_terms;
+        sorted_terms.reserve(inverted_index.size());
+        for (const auto& entry : inverted_index) {
+            sorted_terms.push_back(&entry.first);
+        }
+
+        // Sort lexicographically by dereferencing the string pointers
+        std::sort(sorted_terms.begin(), sorted_terms.end(), [](const std::string* a, const std::string* b) {
+            return *a < *b;
+        });
+
+        // Iterate through the sorted terms and write to the file
+        for (const std::string* term_ptr : sorted_terms) {
+            const std::string& term = *term_ptr;
+            const auto& postings = inverted_index.at(term);
+
+            ordered_json j_out_index;
+            j_out_index["t"] = term;
+            j_out_index["df"] = postings.size();
+            j_out_index["p"] = postings; // Translates to [[id, tf], [id, tf], ...] automatically
+
+            outfile_index << j_out_index.dump() << '\n';
+        }
 
         std::cout << "Indexing complete. Processed " << line_number << " lines. (" << N << " successful documents).\n";
+        std::cout << "Unique terms in inverted index: " << inverted_index.size() << "\n";
 
     } catch (const std::exception& e) {
         std::cerr << "Fatal Error: " << e.what() << '\n';

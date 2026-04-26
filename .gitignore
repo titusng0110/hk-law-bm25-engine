@@ -1,6 +1,5 @@
 *.a
 *.o
 *.exe
-input.txt
-output.txt
 .vscode/
+*.jsonl
