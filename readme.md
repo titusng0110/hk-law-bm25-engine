@@ -12,7 +12,7 @@ The engine features a highly specialized custom tokenizer built to handle the un
 * **Multilingual Support**: Seamlessly handles UTF-8 CJK text alongside English, perfect for bilingual HK legal documents.
 * **Advanced Tokenization**: Includes Snowball stemming, custom stopword filtering, accent flattening, and punctuation handling.
 * **Fast BM25 Scoring**: Precomputes Document Frequencies (DF) and loads a highly optimized in-memory inverted index.
-* **HTTP API**: Provides a fast, multithreaded REST endpoint for querying via JSONL using `cpp-httplib`.
+* **Robust HTTP API**: Provides a fast, multithreaded REST endpoint (`/search`) for bulk querying via NDJSON (`application/x-ndjson`), featuring independent per-line validation and error handling.
 * **Docker Ready**: Includes a multi-stage Dockerfile that compiles the binaries, bakes the index, and outputs a minimal, production-ready Alpine container.
 
 ## Prerequisites
@@ -103,12 +103,12 @@ server.exe -i1 docs.jsonl -i2 index.jsonl -p 8080
 
 ## Querying the Server
 
-Send a `POST` request to `/` with a JSONL payload containing a `query` string and `k` (the maximum number of results to return).
+Send a `POST` request to `/search` with an NDJSON (JSON Lines) payload containing a `query` string and `k` (the maximum number of results to return).
 
 **Example Request:**
 ```bash
-curl -X POST http://localhost:8080/ \
-     -H "Content-Type: application/jsonlines" \
+curl -X POST http://localhost:8080/search \
+     -H "Content-Type: application/x-ndjson" \
      -d '{"query": "employment cap 57 section 2", "k": 5}'
 ```
 
@@ -117,7 +117,29 @@ curl -X POST http://localhost:8080/ \
 [{"id": 2, "score": 4.1845}]
 ```
 
-*Note: The server supports bulk querying. You can send multiple JSON objects separated by newlines in a single POST request, and the server will stream back the top-k results for each query line-by-line.*
+### Bulk Querying & Error Handling
+
+The server supports bulk processing. You can send multiple JSON objects separated by newlines in a single POST request. The server will stream back the results line-by-line in the exact same order.
+
+If a specific line is malformed or missing required fields, the server will not fail the entire batch. Instead, it will output an error object for that specific line while continuing to process the valid ones:
+
+**Bulk Request:**
+```bash
+curl -X POST http://localhost:8080/search \
+     -H "Content-Type: application/x-ndjson" \
+     -d '{"query": "contract breach", "k": 1}
+{"query": "missing k parameter"}
+{"query": "valid query", "k": 2}'
+```
+
+**Bulk Response:**
+```json
+[{"id": 104, "score": 8.123}]
+{"error": "Field 'k' must be a positive integer."}
+[{"id": 8, "score": 5.432}, {"id": 12, "score": 5.111}]
+```
+
+---
 
 ## Credits & Open Source Libraries
 

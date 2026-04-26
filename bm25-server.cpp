@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <sstream>
 #include <memory>
+#include <stdexcept>
 
 #include "nlohmann/json.hpp"
 #include "httplib.h"
@@ -137,22 +138,32 @@ int main(int argc, char* argv[]) {
     httplib::Server svr;
 
     auto search_handler = [](const httplib::Request& req, httplib::Response& res) {
-        try {
-            std::istringstream iss(req.body);
-            std::string req_line;
-            std::string response_body;
+        std::istringstream iss(req.body);
+        std::string req_line;
+        std::string response_body;
 
-            // Use a thread-local tokenizer so that concurrent requests don't interfere
-            thread_local std::unique_ptr<bm25::Tokenizer> tokenizer;
-            if (!tokenizer) {
-                tokenizer = std::make_unique<bm25::Tokenizer>("lexisnexis_stopwords.txt");
-            }
+        // Use a thread-local tokenizer so that concurrent requests don't interfere
+        thread_local std::unique_ptr<bm25::Tokenizer> tokenizer;
+        if (!tokenizer) {
+            tokenizer = std::make_unique<bm25::Tokenizer>("lexisnexis_stopwords.txt");
+        }
 
-            // Process N incoming JSON lines
-            while (std::getline(iss, req_line)) {
-                if (req_line.empty()) continue;
+        // Process N incoming JSON lines
+        while (std::getline(iss, req_line)) {
+            if (req_line.empty()) continue;
 
+            try {
+                // Parse the individual line
                 json j_req = json::parse(req_line);
+
+                // Validate payload to prevent unhandled out-of-range exceptions
+                if (!j_req.contains("query") || !j_req.at("query").is_string()) {
+                    throw std::invalid_argument("Field 'query' must be a string.");
+                }
+                if (!j_req.contains("k") || !j_req.at("k").is_number_integer() || j_req.at("k").get<int>() < 1) {
+                    throw std::invalid_argument("Field 'k' must be a positive integer.");
+                }
+
                 std::string query = j_req.at("query").get<std::string>();
                 size_t k = j_req.at("k").get<size_t>();
 
@@ -195,7 +206,7 @@ int main(int argc, char* argv[]) {
                 // Partial sort to get top-k documents efficiently
                 size_t sort_k = std::min(k, top_docs.size());
                 std::partial_sort(top_docs.begin(), top_docs.begin() + sort_k, top_docs.end(),
-                    [](const DocScore& lhs, const DocScore& rhs) { // Renamed parameters here
+                    [](const DocScore& lhs, const DocScore& rhs) {
                         // Tie breaker based on document ID to ensure deterministic output
                         if (std::abs(lhs.second - rhs.second) < 1e-9) return lhs.first < rhs.first;
                         return lhs.second > rhs.second;
@@ -211,16 +222,21 @@ int main(int argc, char* argv[]) {
                 }
 
                 response_body += j_out.dump() + "\n";
-            }
 
-            res.set_content(response_body, "application/jsonlines");
-        } catch (const std::exception& e) {
-            res.status = 400;
-            res.set_content(std::string("Bad Request: ") + e.what() + "\n", "text/plain");
+            } catch (const std::exception& e) {
+                // If a single line fails (validation, missing fields, json parse error)
+                // Output a JSON error object for THIS line only.
+                json j_error = {{"error", e.what()}};
+                response_body += j_error.dump() + "\n";
+            }
         }
+
+        // Return the accumulated ndjson string
+        res.set_content(response_body, "application/x-ndjson");
     };
 
-    svr.Post("/", search_handler);
+    // Bound to /search to match the Python equivalent, but binding to "/" works too.
+    svr.Post("/search", search_handler);
 
     std::cout << "Server starting on 0.0.0.0:" << port << "...\n";
     svr.listen("0.0.0.0", port);
