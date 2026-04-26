@@ -1,12 +1,9 @@
-To compile:
-
 ```
-mkdir lib
-cd libstemmer_c-3.0.1/
-make
-cp ./libstemmer.a ../lib/
-cd ..
-g++ -O3 -std=c++23 main.cpp lib/libstemmer.a -I include -o engine.exe
+cd libstemmer_c-3.0.1/ && \
+    make && \
+    mkdir -p ../lib && \
+    cp ./libstemmer.a ../lib/
+g++ -O3 -std=c++23 -Wall -Wextra -Wpedantic -Wshadow bm25-indexer.cpp lib/libstemmer.a -I include -o indexer.exe
 ```
 
 Please see:
