@@ -35,7 +35,7 @@ build.bat
 ### Linux
 Open your terminal in the project directory and run:
 ```bash
-chmod +x build.sh
+chmod u+x build.sh
 ./build.sh
 ```
 
