@@ -4,8 +4,9 @@
 #include <vector>
 #include <stdexcept>
 #include <unordered_map>
-#include <array>
-#include <algorithm> // Added for std::sort
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 
 // Ensure you have this library in your include path
 #include "nlohmann/json.hpp"
@@ -15,8 +16,32 @@ using json = nlohmann::json;
 using ordered_json = nlohmann::ordered_json; // Preserve insertion order
 
 void print_usage(const char* prog_name) {
-    std::cerr << "Usage: " << prog_name << " -i input.jsonl -o1 docs.jsonl -o2 index.jsonl\n";
+    std::cerr << "Usage: " << prog_name << " -i input.jsonl -o1 docs.jsonl -o2 index.bin\n";
 }
+
+// Flat struct for the intermediate indexing pass
+struct TempPosting {
+    uint32_t term_id;
+    uint32_t doc_id;
+    uint32_t tf;
+    uint32_t pos_offset;
+    uint32_t pos_length;
+};
+
+// Flat struct for local document token parsing
+struct DocToken {
+    uint32_t term_id;
+    uint32_t pos;
+};
+
+// Flat struct for final dictionary export
+struct TermDictEntry {
+    std::string term;
+    uint32_t df;
+    double max_score;
+    uint32_t posting_offset;
+    uint32_t posting_length;
+};
 
 int main(int argc, char* argv[]) {
     std::string input_path;
@@ -57,112 +82,210 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::ofstream outfile_index(index_output_path);
-    if (!outfile_index.is_open()) {
-        std::cerr << "Error: Could not open index output file " << index_output_path << "\n";
-        return 1;
-    }
+    // 3. Flat Data-Oriented Containers
+    std::vector<TempPosting> temp_postings;
+    std::vector<uint32_t> global_positions;
 
-    // 3. Process the JSONL chunk
-    try {
-        // Initialize the tokenizer once
-        bm25::Tokenizer tokenizer("lexisnexis_stopwords.txt");
+    std::unordered_map<std::string, uint32_t> term_to_id;
+    std::vector<std::string> id_to_term;
+    std::unordered_map<uint32_t, uint32_t> doc_lengths;
 
-        // Keep ONE token vector allocated to reuse capacity
-        std::vector<std::pair<std::string, uint32_t>> doc_tokens;
+    bm25::Tokenizer tokenizer("lexisnexis_stopwords.txt");
+    std::vector<std::pair<std::string, uint32_t>> doc_tokens;
+    std::vector<DocToken> current_doc_tokens;
 
-        // In-memory inverted index for this chunk.
-        // Maps Term -> List of [doc_id, tf].
-        // We use std::array<uint32_t, 2> so nlohmann/json outputs exactly [[id, tf], ...]
-        std::unordered_map<std::string, std::vector<std::array<uint32_t, 2>>> inverted_index;
+    std::string line;
+    size_t line_number = 0;
+    uint32_t N = 0;
+    uint64_t total_length = 0;
 
-        std::string line;
-        size_t line_number = 0;
-        uint32_t N = 0;
+    std::cout << "Phase 1: Parsing and building flat positional arrays...\n";
 
-        while (std::getline(infile, line)) {
-            line_number++;
+    // ==========================================
+    // PHASE 1: DOD Parsing (Append-Only)
+    // ==========================================
+    while (std::getline(infile, line)) {
+        line_number++;
+        if (line.empty()) continue;
 
-            // Skip empty lines if any exist
-            if (line.empty()) continue;
+        try {
+            json j_in = json::parse(line);
+            uint32_t doc_id = j_in.at("id").get<uint32_t>();
+            std::string text = j_in.at("text").get<std::string>();
 
-            try {
-                // Parse the incoming JSON line
-                json j_in = json::parse(line);
+            doc_tokens.clear();
+            current_doc_tokens.clear();
+            tokenizer.tokenize(text, doc_tokens);
 
-                // Extract fields
-                uint32_t doc_id = j_in.at("id").get<uint32_t>();
-                std::string text = j_in.at("text").get<std::string>();
+            uint32_t D = doc_tokens.size();
+            doc_lengths[doc_id] = D;
+            total_length += D;
 
-                // Clear vector before tokenizing
-                doc_tokens.clear();
+            // Map string tokens to integers for fast flat sorting
+            for (const auto& token_pair : doc_tokens) {
+                const std::string& term = token_pair.first;
+                uint32_t pos = token_pair.second;
 
-                // Tokenize
-                tokenizer.tokenize(text, doc_tokens);
-
-                uint32_t D = 0; // Document length
-
-                // Process tokens to calculate D and update the inverted index
-                for (const auto& tf_pair : doc_tokens) {
-                    const std::string& term = tf_pair.first;
-                    uint32_t term_freq = tf_pair.second;
-
-                    // Add term frequencies to the document length
-                    D += term_freq;
-
-                    // Push [doc_id, tf] directly to the inverted index postings list
-                    inverted_index[term].push_back({doc_id, term_freq});
+                auto it = term_to_id.find(term);
+                uint32_t tid;
+                if (it == term_to_id.end()) {
+                    tid = id_to_term.size();
+                    term_to_id[term] = tid;
+                    id_to_term.push_back(term);
+                } else {
+                    tid = it->second;
                 }
-
-                // Build and write out the docs.jsonl JSON object
-                ordered_json j_out_docs;
-                j_out_docs["id"] = doc_id;
-                j_out_docs["D"] = D;
-                j_out_docs["text"] = text;
-
-                outfile_docs << j_out_docs.dump() << '\n';
-
-                N++;
-
-            } catch (const json::exception& e) {
-                std::cerr << "JSON Parsing Error on line " << line_number << ": " << e.what() << "\n";
+                current_doc_tokens.push_back({tid, pos});
             }
+
+            // Sort document tokens by Term ID, then chronologically by Position
+            std::sort(current_doc_tokens.begin(), current_doc_tokens.end(),
+                      [](const DocToken& a, const DocToken& b) {
+                          if (a.term_id != b.term_id) return a.term_id < b.term_id;
+                          return a.pos < b.pos;
+                      });
+
+            // Iterate contiguous blocks of term_ids to create temp_postings
+            if (!current_doc_tokens.empty()) {
+                uint32_t current_term = current_doc_tokens[0].term_id;
+                uint32_t tf = 0;
+                uint32_t pos_offset = global_positions.size();
+
+                for (const auto& dt : current_doc_tokens) {
+                    if (dt.term_id != current_term) {
+                        temp_postings.push_back({current_term, doc_id, tf, pos_offset, tf});
+                        current_term = dt.term_id;
+                        tf = 0;
+                        pos_offset = global_positions.size();
+                    }
+                    global_positions.push_back(dt.pos); // Append to giant positions array
+                    tf++;
+                }
+                // Push trailing term
+                temp_postings.push_back({current_term, doc_id, tf, pos_offset, tf});
+            }
+
+            ordered_json j_out_docs;
+            j_out_docs["id"] = doc_id;
+            j_out_docs["D"] = D;
+            j_out_docs["text"] = text;
+            outfile_docs << j_out_docs.dump() << '\n';
+
+            N++;
+        } catch (const json::exception& e) {
+            std::cerr << "JSON Parsing Error on line " << line_number << ": " << e.what() << "\n";
+        }
+    }
+
+    // ==========================================
+    // PHASE 2: Sort Postings & BM25 MaxScore Precomp
+    // ==========================================
+    std::cout << "Phase 2: Sorting flat indices and calculating BM25 MaxScores...\n";
+
+    // Sort postings by term_id, then doc_id (Strict DAAT Architecture)
+    std::sort(temp_postings.begin(), temp_postings.end(),
+              [](const TempPosting& a, const TempPosting& b) {
+                  if (a.term_id != b.term_id) return a.term_id < b.term_id;
+                  return a.doc_id < b.doc_id;
+              });
+
+    double avgdl = N > 0 ? static_cast<double>(total_length) / N : 0.0;
+    const double k1 = 1.2;
+    const double b = 0.75;
+
+    std::vector<uint32_t> global_postings;
+    global_postings.reserve(temp_postings.size() * 4); // Format: [doc_id, tf, pos_offset, pos_length]
+    std::vector<TermDictEntry> dictionary;
+
+    auto it = temp_postings.begin();
+    while (it != temp_postings.end()) {
+        uint32_t current_term_id = it->term_id;
+        auto group_start = it;
+        uint32_t df = 0;
+
+        // Find the length of the contiguous block for this term
+        while (it != temp_postings.end() && it->term_id == current_term_id) {
+            df++;
+            it++;
         }
 
-        // 4. Sort and Dump the inverted index to index.jsonl
+        // BM25 IDF using standard +0.5 smoothing (strictly positive formulation)
+        double idf = std::log(1.0 + (N - df + 0.5) / (df + 0.5));
+        double max_score = 0.0;
+        uint32_t posting_offset = global_postings.size();
 
-        // Extract pointers to the keys (terms) to avoid making string copies
-        std::vector<const std::string*> sorted_terms;
-        sorted_terms.reserve(inverted_index.size());
-        for (const auto& entry : inverted_index) {
-            sorted_terms.push_back(&entry.first);
+        for (auto p = group_start; p != it; ++p) {
+            uint32_t tf = p->tf;
+            uint32_t D = doc_lengths[p->doc_id];
+
+            // BM25 Score calculation
+            double score = idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (static_cast<double>(D) / avgdl)));
+            if (score > max_score) {
+                max_score = score;
+            }
+
+            // Flatten into the giant postings array
+            global_postings.push_back(p->doc_id);
+            global_postings.push_back(tf);
+            global_postings.push_back(p->pos_offset);
+            global_postings.push_back(p->pos_length);
         }
 
-        // Sort lexicographically by dereferencing the string pointers
-        std::sort(sorted_terms.begin(), sorted_terms.end(), [](const std::string* a, const std::string* b) {
-            return *a < *b;
+        uint32_t posting_length = global_postings.size() - posting_offset;
+
+        dictionary.push_back({
+            id_to_term[current_term_id],
+            df,
+            max_score,
+            posting_offset,
+            posting_length
         });
+    }
 
-        // Iterate through the sorted terms and write to the file
-        for (const std::string* term_ptr : sorted_terms) {
-            const std::string& term = *term_ptr;
-            const auto& postings = inverted_index.at(term);
+    // ==========================================
+    // PHASE 3: Raw Binary I/O Export
+    // ==========================================
+    std::cout << "Phase 3: Serializing index to raw binary file...\n";
 
-            ordered_json j_out_index;
-            j_out_index["t"] = term;
-            j_out_index["df"] = postings.size();
-            j_out_index["p"] = postings; // Translates to [[id, tf], [id, tf], ...] automatically
-
-            outfile_index << j_out_index.dump() << '\n';
-        }
-
-        std::cout << "Indexing complete. Processed " << line_number << " lines. (" << N << " successful documents).\n";
-        std::cout << "Unique terms in inverted index: " << inverted_index.size() << "\n";
-
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal Error: " << e.what() << '\n';
+    FILE* out_bin = std::fopen(index_output_path.c_str(), "wb");
+    if (!out_bin) {
+        std::cerr << "Fatal Error: Could not open binary output file " << index_output_path << "\n";
         return 1;
     }
+
+    // 1. Write Header Info (Critical for reconstructing BM25 at query time)
+    std::fwrite(&N, sizeof(uint32_t), 1, out_bin);
+    std::fwrite(&avgdl, sizeof(double), 1, out_bin);
+
+    uint32_t num_terms = dictionary.size();
+    std::fwrite(&num_terms, sizeof(uint32_t), 1, out_bin);
+
+    // 2. Write Dictionary
+    for (const auto& entry : dictionary) {
+        uint32_t t_len = entry.term.size();
+        std::fwrite(&t_len, sizeof(uint32_t), 1, out_bin);
+        std::fwrite(entry.term.data(), 1, t_len, out_bin);
+        std::fwrite(&entry.df, sizeof(uint32_t), 1, out_bin);
+        std::fwrite(&entry.max_score, sizeof(double), 1, out_bin);
+        std::fwrite(&entry.posting_offset, sizeof(uint32_t), 1, out_bin);
+        std::fwrite(&entry.posting_length, sizeof(uint32_t), 1, out_bin);
+    }
+
+    // 3. Write Giant Flattened Arrays
+    size_t gpost_size = global_postings.size();
+    std::fwrite(&gpost_size, sizeof(size_t), 1, out_bin);
+    std::fwrite(global_postings.data(), sizeof(uint32_t), gpost_size, out_bin);
+
+    size_t gpos_size = global_positions.size();
+    std::fwrite(&gpos_size, sizeof(size_t), 1, out_bin);
+    std::fwrite(global_positions.data(), sizeof(uint32_t), gpos_size, out_bin);
+
+    std::fclose(out_bin);
+
+    std::cout << "Indexing complete. Processed " << line_number << " lines. (" << N << " successful documents).\n";
+    std::cout << "Unique terms indexed: " << num_terms << "\n";
+    std::cout << "Global Postings length: " << gpost_size << " integers.\n";
+    std::cout << "Global Positions length: " << gpos_size << " integers.\n";
 
     return 0;
 }

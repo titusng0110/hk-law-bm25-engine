@@ -1,5 +1,3 @@
-#pragma once
-
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -9,8 +7,8 @@
 #include <stdexcept>
 #include <cctype>
 #include <iterator>
-#include <algorithm>          // Added for std::sort
-#include <utility>            // Added for std::pair
+#include <algorithm>
+#include <utility>
 
 // External libraries
 #include "utf8.h"             // utf8cpp
@@ -55,9 +53,8 @@ namespace detail {
         if (s.empty()) return false;
         size_t pos = 0;
 
-        // Tens (0 to 100)
         if (s.starts_with("xc")) pos += 2;
-        else if (s.starts_with("c")) pos += 1; // 100
+        else if (s.starts_with("c")) pos += 1;
         else if (s.starts_with("lxxx")) pos += 4;
         else if (s.starts_with("lxx")) pos += 3;
         else if (s.starts_with("lx")) pos += 2;
@@ -67,21 +64,30 @@ namespace detail {
         else if (s.starts_with("xx")) pos += 2;
         else if (s.starts_with("x")) pos += 1;
 
-        // Ones (0 to 9)
         if (pos < s.length()) {
             std::string_view rem = s.substr(pos);
-            if (rem == "ix") pos += 2;
-            else if (rem == "viii") pos += 4;
-            else if (rem == "vii") pos += 3;
-            else if (rem == "vi") pos += 2;
-            else if (rem == "v") pos += 1;
-            else if (rem == "iv") pos += 2;
-            else if (rem == "iii") pos += 3;
-            else if (rem == "ii") pos += 2;
-            else if (rem == "i") pos += 1;
+            if (rem.starts_with("ix")) pos += 2;
+            else if (rem.starts_with("viii")) pos += 4;
+            else if (rem.starts_with("vii")) pos += 3;
+            else if (rem.starts_with("vi")) pos += 2;
+            else if (rem.starts_with("v")) pos += 1;
+            else if (rem.starts_with("iv")) pos += 2;
+            else if (rem.starts_with("iii")) pos += 3;
+            else if (rem.starts_with("ii")) pos += 2;
+            else if (rem.starts_with("i")) pos += 1;
         }
 
-        return pos == s.length();
+        // Must have matched at least one Roman numeral character
+        if (pos == 0) return false;
+
+        // Count trailing letters (to allow HK 'Part VIA', 'Part IVA', but block long garbage strings)
+        size_t letter_count = 0;
+        for (size_t i = pos; i < s.length(); ++i) {
+            if (s[i] < 'a' || s[i] > 'z') return false;
+            letter_count++;
+        }
+
+        return letter_count <= 1; // Change to '== 0' if you want to ban trailing letters entirely!
     }
 
     enum class StatKeywordType { None, Abbreviation, FullWord };
@@ -99,7 +105,7 @@ namespace detail {
             s == "paragraph" || s == "paragraphs" || s == "subparagraph" || s == "subparagraphs" ||
             s == "part" || s == "division" || s == "schedule" || s == "schedules" ||
             s == "rule" || s == "order" || s == "chapter" || s == "article" ||
-            s == "clause" || s == "provision" || s == "term" || s == "appendix" || s == "annex"/*contract keywords*/) {
+            s == "clause" || s == "provision" || s == "term" || s == "appendix" || s == "annex") {
             return StatKeywordType::FullWord;
         }
         return StatKeywordType::None;
@@ -109,26 +115,32 @@ namespace detail {
     constexpr bool is_valid_citation_token(std::string_view s) {
         if (s.empty()) return false;
 
-        // Rule 1: Roman numeral up to 100
+        // Rule 1: Roman numeral (+ max 1 appendix letter)
         if (is_roman_numeral_upto_100(s)) return true;
 
-        // Rule 2, 3, & 4: Pure digits, OR digits + 1 letter, OR exactly 1 letter
-        bool all_digits_until_last = true;
-        for (size_t i = 0; i < s.length() - 1; ++i) {
-            if (s[i] < '0' || s[i] > '9') {
-                all_digits_until_last = false;
-                break;
+        // Rule 2: Starts with a digit, followed by MAXIMUM 2 letters. No digits after letters.
+        if (s[0] >= '0' && s[0] <= '9') {
+            size_t letter_count = 0;
+            bool letters_started = false;
+
+            for (char c : s) {
+                if (c >= '0' && c <= '9') {
+                    // If we already saw a letter, another digit is illegal (e.g., "32a1" fails)
+                    if (letters_started) return false;
+                } else if (c >= 'a' && c <= 'z') {
+                    letters_started = true;
+                    letter_count++;
+                } else {
+                    // Fails on symbols or punctuation
+                    return false;
+                }
             }
+            return letter_count <= 2; // Validates "32", "32w", "32aa". Fails "32aaa".
         }
 
-        if (all_digits_until_last) {
-            char last = s.back();
-            bool is_last_digit = (last >= '0' && last <= '9');
-            bool is_last_letter = (last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z');
-
-            if (is_last_digit || is_last_letter) {
-                return true;
-            }
+        // Rule 3: Single standalone letters (e.g., Appendix A, Schedule B)
+        if (s.length() == 1 && s[0] >= 'a' && s[0] <= 'z') {
+            return true;
         }
 
         return false;
@@ -150,10 +162,13 @@ private:
     FastSet stopwords;
     struct sb_stemmer* stemmer = nullptr;
 
+    // NOW TRACKING POSITIONS: std::pair<token_string, absolute_position>
+    using PosToken = std::pair<std::string, uint32_t>;
+
     // Pre-allocated vectors to prevent reallocation during bulk indexing
-    std::vector<std::string> raw_tokens;
-    std::vector<std::string> phase2_tokens;
-    std::vector<std::string> phase3_tokens;
+    std::vector<PosToken> raw_tokens;
+    std::vector<PosToken> phase2_tokens;
+    std::vector<PosToken> phase3_tokens;
     std::string current_english_word;
 
     static FastSet load_set(std::string_view filename) {
@@ -204,18 +219,22 @@ public:
         other.stemmer = nullptr;
     }
 
+    // Convenience wrapper returning the vector
     std::vector<std::pair<std::string, uint32_t>> tokenize(std::string_view text) {
-        std::vector<std::pair<std::string, uint32_t>> out_tf;
-        tokenize(text, out_tf);
-        return out_tf;
+        std::vector<std::pair<std::string, uint32_t>> out_tokens;
+        tokenize(text, out_tokens);
+        return out_tokens;
     }
 
-    void tokenize(std::string_view text, std::vector<std::pair<std::string, uint32_t>>& out_tf) {
-        out_tf.clear();
+    // Main tokenization loop. Modifies out_tokens in place to save allocations.
+    void tokenize(std::string_view text, std::vector<std::pair<std::string, uint32_t>>& out_tokens) {
+        out_tokens.clear();
         if (text.empty()) return;
 
         raw_tokens.clear();
         current_english_word.clear();
+
+        uint32_t absolute_pos = 0; // CRITICAL: The running position tracker
 
         // ==========================================
         // PART 1: THE FLUSHING & VIRTUAL LAMBDAS
@@ -230,6 +249,7 @@ public:
             if (!is_stat_keyword && !is_citation) {
                 if (stopwords.contains(current_english_word)) {
                     current_english_word.clear();
+                    absolute_pos++; // CONSUME POSITION EVEN IF DROPPED
                     return;
                 }
             }
@@ -243,22 +263,23 @@ public:
                 current_english_word = reinterpret_cast<const char*>(stemmed);
             }
 
-            raw_tokens.push_back(std::move(current_english_word));
+            raw_tokens.emplace_back(std::move(current_english_word), absolute_pos);
+            absolute_pos++; // Advance for next word
             current_english_word.clear();
         };
 
         // Collapses consecutive virtual tokens into the "strongest" one
-        // Hierarchy of blocking strength: DRO > PER > SPA
         auto emit_virtual = [&](std::string_view v) {
             if (raw_tokens.empty()) return;
-            if (detail::is_virtual(raw_tokens.back())) {
+            if (detail::is_virtual(raw_tokens.back().first)) {
                 if (v == detail::V_DRO) {
-                    raw_tokens.back() = detail::V_DRO;
-                } else if (v == detail::V_PER && raw_tokens.back() == detail::V_SPA) {
-                    raw_tokens.back() = detail::V_PER;
+                    raw_tokens.back().first = detail::V_DRO;
+                } else if (v == detail::V_PER && raw_tokens.back().first == detail::V_SPA) {
+                    raw_tokens.back().first = detail::V_PER;
                 }
             } else {
-                raw_tokens.emplace_back(v);
+                // Virtual tokens are dropped later, position 0 is just a placeholder
+                raw_tokens.emplace_back(std::string(v), 0);
             }
         };
 
@@ -318,10 +339,28 @@ public:
             // 3. Decimals
             else if (cp == U'.') {
                 if (detail::is_digit(prev_cp) && detail::is_digit(next_cp)) {
+                    // It's a true decimal like 3.14
                     utf8::append(cp, std::back_inserter(current_english_word));
                 } else {
+                    // Check if the word before the period is an abbreviation
+                    bool is_abbrev = false;
+                    if (!current_english_word.empty()) {
+                        auto stat_type = detail::get_statutory_keyword_type(current_english_word);
+                        if (stat_type == detail::StatKeywordType::Abbreviation) {
+                            is_abbrev = true;
+                        } else if (current_english_word.length() <= 2) {
+                            // Catch general short abbreviations like "v.", "Mr.", "U.S."
+                            is_abbrev = true;
+                        }
+                    }
+
                     flush_english_word();
-                    emit_virtual(detail::V_PER); // Note boundary
+                    emit_virtual(detail::V_PER);
+
+                    // ONLY apply the sentence penalty if it wasn't an abbreviation!
+                    if (!is_abbrev) {
+                        absolute_pos += 8; // CROSS-SENTENCE BLEED PENALTY
+                    }
                 }
                 last_was_cjk = false;
             }
@@ -331,7 +370,7 @@ public:
                     utf8::append(cp, std::back_inserter(current_english_word));
                 } else {
                     flush_english_word();
-                    emit_virtual(detail::V_DRO); // Note boundary
+                    emit_virtual(detail::V_DRO);
                 }
                 last_was_cjk = false;
             }
@@ -341,7 +380,7 @@ public:
                     utf8::append(cp, std::back_inserter(current_english_word));
                 } else {
                     flush_english_word();
-                    emit_virtual(detail::V_DRO); // Note boundary
+                    emit_virtual(detail::V_DRO);
                 }
                 last_was_cjk = false;
             }
@@ -349,20 +388,26 @@ public:
             else if (cp == U'(' || cp == U')' || cp == 0xFF08 || cp == 0xFF09) {
                 flush_english_word();
                 char normalized_bracket = (cp == U'(' || cp == 0xFF08) ? '(' : ')';
-                raw_tokens.emplace_back(std::string(1, normalized_bracket));
+                raw_tokens.emplace_back(std::string(1, normalized_bracket), absolute_pos);
+                absolute_pos++; // Brackets consume a position
                 last_was_cjk = false;
             }
-            // 7. CJK
+            // 7. CJK (With Position Stacking for Bigrams)
             else if (detail::is_cjk(cp)) {
                 flush_english_word();
                 std::string current_cjk_char;
                 utf8::append(cp, std::back_inserter(current_cjk_char));
 
-                raw_tokens.push_back(current_cjk_char);
+                // Unigram gets current absolute position
+                raw_tokens.emplace_back(current_cjk_char, absolute_pos);
+
+                // Bigram gets STACKED on the PREVIOUS character's position
                 if (last_was_cjk) {
-                    raw_tokens.push_back(prev_cjk_char + current_cjk_char);
+                    raw_tokens.emplace_back(prev_cjk_char + current_cjk_char, absolute_pos - 1);
                 }
+
                 prev_cjk_char = current_cjk_char;
+                absolute_pos++; // Advance position for next char
                 last_was_cjk = true;
             }
             // 8. Delimiters
@@ -372,6 +417,7 @@ public:
                     emit_virtual(detail::V_SPA);
                 } else if (cp == 0x3002 || cp == 0xFF0E) { // Asian Full Stops
                     emit_virtual(detail::V_PER);
+                    absolute_pos += 8; // CROSS-SENTENCE BLEED PENALTY
                 } else {
                     emit_virtual(detail::V_DRO);
                 }
@@ -386,22 +432,21 @@ public:
         // ==========================================
         phase2_tokens.clear();
         for (size_t i = 0; i < raw_tokens.size(); ++i) {
-            if (raw_tokens[i] == "(") {
+            if (raw_tokens[i].first == "(") {
                 size_t inner_idx = -1;
                 size_t close_idx = -1;
                 int tokens_checked = 0;
 
-                // Lookahead to find the exact configuration (inner) while skipping virtual gap tokens
                 for (size_t j = i + 1; j < raw_tokens.size(); ++j) {
-                    if (detail::is_virtual(raw_tokens[j])) continue;
+                    if (detail::is_virtual(raw_tokens[j].first)) continue;
 
-                    if (tokens_checked >= 2) break; // We only care about the next 2 real tokens
+                    if (tokens_checked >= 2) break;
 
                     if (inner_idx == static_cast<size_t>(-1)) {
                         inner_idx = j;
                         tokens_checked++;
                     } else if (close_idx == static_cast<size_t>(-1)) {
-                        if (raw_tokens[j] == ")") {
+                        if (raw_tokens[j].first == ")") {
                             close_idx = j;
                         }
                         tokens_checked++;
@@ -409,27 +454,27 @@ public:
                     }
                 }
 
-                if (inner_idx != static_cast<size_t>(-1) && close_idx != static_cast<size_t>(-1) && detail::is_valid_citation_token(raw_tokens[inner_idx])) {
-                    // Find the last real/non-virtual token we produced
+                if (inner_idx != static_cast<size_t>(-1) && close_idx != static_cast<size_t>(-1) && detail::is_valid_citation_token(raw_tokens[inner_idx].first)) {
                     size_t prev_idx = phase2_tokens.size();
-                    while (prev_idx > 0 && detail::is_virtual(phase2_tokens[prev_idx - 1])) {
+                    while (prev_idx > 0 && detail::is_virtual(phase2_tokens[prev_idx - 1].first)) {
                         prev_idx--;
                     }
 
                     if (prev_idx > 0) {
-                        std::string& prev = phase2_tokens[prev_idx - 1];
-                        bool prev_is_valid = prev.ends_with(')') || detail::is_valid_citation_token(prev);
+                        auto& prev = phase2_tokens[prev_idx - 1];
+                        bool prev_is_valid = prev.first.ends_with(')') || detail::is_valid_citation_token(prev.first);
 
                         if (prev_is_valid) {
-                            prev += "(" + raw_tokens[inner_idx] + ")";
-                            i = close_idx; // Jump indices to consume the merged closure
+                            // Append string, but retain the ORIGINAL anchor position!
+                            prev.first += "(" + raw_tokens[inner_idx].first + ")";
+                            i = close_idx; // Jump indices
                             continue;
                         }
                     }
                 }
             }
 
-            if (raw_tokens[i] != "(" && raw_tokens[i] != ")") {
+            if (raw_tokens[i].first != "(" && raw_tokens[i].first != ")") {
                 phase2_tokens.push_back(std::move(raw_tokens[i]));
             }
         }
@@ -440,28 +485,22 @@ public:
         phase3_tokens.clear();
         for (size_t i = 0; i < phase2_tokens.size(); ++i) {
             // NEVER pass virtual tokens into the final array
-            if (detail::is_virtual(phase2_tokens[i])) {
+            if (detail::is_virtual(phase2_tokens[i].first)) {
                 continue;
             }
 
-            detail::StatKeywordType stat_type = detail::get_statutory_keyword_type(phase2_tokens[i]);
+            detail::StatKeywordType stat_type = detail::get_statutory_keyword_type(phase2_tokens[i].first);
 
             if (stat_type != detail::StatKeywordType::None) {
                 size_t next_real_idx = static_cast<size_t>(-1);
                 std::string_view gap_type = "";
 
-                // Look ahead to find the next valid target and trace the virtual gaps dropped between them
                 for (size_t j = i + 1; j < phase2_tokens.size(); ++j) {
-                    if (detail::is_virtual(phase2_tokens[j])) {
-                        // Track strongest gap marker using upgrading (DRO > PER > SPA)
+                    if (detail::is_virtual(phase2_tokens[j].first)) {
                         if (gap_type != detail::V_DRO) {
-                            if (phase2_tokens[j] == detail::V_DRO) {
-                                gap_type = detail::V_DRO;
-                            } else if (phase2_tokens[j] == detail::V_PER) {
-                                gap_type = detail::V_PER;
-                            } else if (phase2_tokens[j] == detail::V_SPA && gap_type == "") {
-                                gap_type = detail::V_SPA;
-                            }
+                            if (phase2_tokens[j].first == detail::V_DRO) gap_type = detail::V_DRO;
+                            else if (phase2_tokens[j].first == detail::V_PER) gap_type = detail::V_PER;
+                            else if (phase2_tokens[j].first == detail::V_SPA && gap_type == "") gap_type = detail::V_SPA;
                         }
                     } else {
                         next_real_idx = j;
@@ -470,7 +509,7 @@ public:
                 }
 
                 if (next_real_idx != static_cast<size_t>(-1)) {
-                    const std::string& next_token = phase2_tokens[next_real_idx];
+                    const std::string& next_token = phase2_tokens[next_real_idx].first;
 
                     std::string_view base_target = next_token;
                     size_t bracket_pos = base_target.find('(');
@@ -481,55 +520,41 @@ public:
                     if (detail::is_valid_citation_token(base_target)) {
                         bool can_merge = false;
 
-                        // Strict validation based on gap types
                         if (stat_type == detail::StatKeywordType::FullWord) {
-                            // "section 1" -> Needs pure adjacency or mere spacing
                             if (gap_type == "" || gap_type == detail::V_SPA) can_merge = true;
                         } else if (stat_type == detail::StatKeywordType::Abbreviation) {
-                            // "s.1", "s 1", "s. 1" -> Needs adjacency, spacing, or periods. Rejects generic drops (s-1)
                             if (gap_type == "" || gap_type == detail::V_SPA || gap_type == detail::V_PER) can_merge = true;
                         }
 
                         if (can_merge) {
-                            std::string merged = phase2_tokens[i];
+                            std::string merged = phase2_tokens[i].first;
                             if (stat_type == detail::StatKeywordType::Abbreviation) {
                                 merged += "." + next_token;
                             } else {
                                 merged += " " + next_token;
                             }
-                            phase3_tokens.push_back(std::move(merged));
-                            // i = next_real_idx;
-                            // continue;
-                            // deliberately inject unigrams
+                            // Emplace Bigram STACKED on the Unigram's anchor position
+                            phase3_tokens.emplace_back(std::move(merged), phase2_tokens[i].second);
+
+                            // Deliberately allow the unigram to fall through and be pushed below as well
                         }
                     }
                 }
             }
+            // Push the unigram (or already merged token from Phase 2)
             phase3_tokens.push_back(std::move(phase2_tokens[i]));
         }
 
         // ==========================================
-        // PART 5: TERM FREQUENCY CALCULATION
+        // PART 5: TRANSFER TO OUTPUT
         // ==========================================
         if (phase3_tokens.empty()) return;
 
-        // Sort tokens to easily count occurrences
-        std::sort(phase3_tokens.begin(), phase3_tokens.end());
+        out_tokens.reserve(phase3_tokens.size());
 
-        out_tf.reserve(phase3_tokens.size()); // Pre-allocate upper bound
-        int current_count = 1;
-
-        for (size_t i = 1; i < phase3_tokens.size(); ++i) {
-            if (phase3_tokens[i] == phase3_tokens[i - 1]) {
-                current_count++;
-            } else {
-                // Emplace and reset count when moving to a new unique token
-                out_tf.emplace_back(std::move(phase3_tokens[i - 1]), current_count);
-                current_count = 1;
-            }
+        for (auto& token : phase3_tokens) {
+            out_tokens.push_back(std::move(token));
         }
-        // Emplace the very last processed token group
-        out_tf.emplace_back(std::move(phase3_tokens.back()), current_count);
     }
 };
 
