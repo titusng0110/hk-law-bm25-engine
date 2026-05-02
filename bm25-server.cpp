@@ -111,7 +111,7 @@ auto heap_cmp = [](const DocScore& left, const DocScore& right) {
 };
 
 void print_usage(const char* prog_name) {
-    std::cerr << "Usage: " << prog_name << " -i1 docs.jsonl -i2 index.bin -p 8080\n";
+    std::cerr << "Usage: " << prog_name << " -i1 docs.jsonl -i2 index.bin -p 8080" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -135,7 +135,7 @@ int main(int argc, char* argv[]) {
     // ==========================================
     // 1. Load Docs & Precompute BM25 Penalities
     // ==========================================
-    std::cout << "Loading docs from " << docs_path << "...\n";
+    std::cout << "Loading docs from " << docs_path << "..." << std::endl;
     std::ifstream fdocs(docs_path);
     if (!fdocs.is_open()) return 1;
 
@@ -156,10 +156,10 @@ int main(int argc, char* argv[]) {
     // ==========================================
     // 2. Load Raw Binary Index
     // ==========================================
-    std::cout << "Loading binary index from " << index_path << "...\n";
+    std::cout << "Loading binary index from " << index_path << "..." << std::endl;
     FILE* in_bin = std::fopen(index_path.c_str(), "rb");
     if (!in_bin) {
-        std::cerr << "Fatal: Could not open " << index_path << "\n";
+        std::cerr << "Fatal: Could not open " << index_path << std::endl;
         return 1;
     }
 
@@ -167,7 +167,7 @@ int main(int argc, char* argv[]) {
 #define SAFE_READ(ptr, size, count, stream) \
     do { \
         if (std::fread(ptr, size, count, stream) != (count)) { \
-            std::cerr << "Fatal: Failed to read from index file.\n"; \
+            std::cerr << "Fatal: Failed to read from index file." << std::endl; \
             std::fclose(stream); \
             return 1; \
         } \
@@ -216,7 +216,7 @@ int main(int argc, char* argv[]) {
     }
     temp_doc_lengths.clear(); temp_doc_lengths.shrink_to_fit();
 
-    std::cout << "Index loaded. Terms: " << num_terms << ", N: " << N << ", avgdl: " << avgdl << "\n";
+    std::cout << "Index loaded. Terms: " << num_terms << ", N: " << N << ", avgdl: " << avgdl << std::endl;
 
     // ==========================================
     // 3. HTTP Server & Query Handler
@@ -427,7 +427,7 @@ int main(int argc, char* argv[]) {
 
     svr.Post("/search", search_handler);
 
-    std::cout << "Server listening on 0.0.0.0:" << port << "...\n";
+    std::cout << "Server listening on 0.0.0.0:" << port << "..." << std::endl;
     svr.listen("0.0.0.0", port);
 
     return 0;

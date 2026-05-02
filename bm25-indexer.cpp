@@ -16,7 +16,7 @@ using json = nlohmann::json;
 using ordered_json = nlohmann::ordered_json; // Preserve insertion order
 
 void print_usage(const char* prog_name) {
-    std::cerr << "Usage: " << prog_name << " -i input.jsonl -o1 docs.jsonl -o2 index.bin\n";
+    std::cerr << "Usage: " << prog_name << " -i input.jsonl -o1 docs.jsonl -o2 index.bin" << std::endl;
 }
 
 // Flat struct for the intermediate indexing pass
@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-o2" && i + 1 < argc) {
             index_output_path = argv[++i];
         } else {
-            std::cerr << "Unknown or incomplete argument: " << arg << "\n";
+            std::cerr << "Unknown or incomplete argument: " << arg << std::endl;
             print_usage(argv[0]);
             return 1;
         }
@@ -72,13 +72,13 @@ int main(int argc, char* argv[]) {
     // 2. Open File Streams
     std::ifstream infile(input_path);
     if (!infile.is_open()) {
-        std::cerr << "Error: Could not open input file " << input_path << "\n";
+        std::cerr << "Error: Could not open input file " << input_path << std::endl;
         return 1;
     }
 
     std::ofstream outfile_docs(docs_output_path);
     if (!outfile_docs.is_open()) {
-        std::cerr << "Error: Could not open docs output file " << docs_output_path << "\n";
+        std::cerr << "Error: Could not open docs output file " << docs_output_path << std::endl;
         return 1;
     }
 
@@ -99,7 +99,7 @@ int main(int argc, char* argv[]) {
     uint32_t N = 0;
     uint64_t total_length = 0;
 
-    std::cout << "Phase 1: Parsing and building flat positional arrays...\n";
+    std::cout << "Phase 1: Parsing and building flat positional arrays..." << std::endl;
 
     // ==========================================
     // PHASE 1: DOD Parsing (Append-Only)
@@ -173,14 +173,14 @@ int main(int argc, char* argv[]) {
 
             N++;
         } catch (const json::exception& e) {
-            std::cerr << "JSON Parsing Error on line " << line_number << ": " << e.what() << "\n";
+            std::cerr << "JSON Parsing Error on line " << line_number << ": " << e.what() << std::endl;
         }
     }
 
     // ==========================================
     // PHASE 2: Sort Postings & BM25 MaxScore Precomp
     // ==========================================
-    std::cout << "Phase 2: Sorting flat indices and calculating BM25 MaxScores...\n";
+    std::cout << "Phase 2: Sorting flat indices and calculating BM25 MaxScores..." << std::endl;
 
     // Sort postings by term_id, then doc_id (Strict DAAT Architecture)
     std::sort(temp_postings.begin(), temp_postings.end(),
@@ -252,11 +252,11 @@ int main(int argc, char* argv[]) {
     // ==========================================
     // PHASE 3: Raw Binary I/O Export
     // ==========================================
-    std::cout << "Phase 3: Serializing index to raw binary file...\n";
+    std::cout << "Phase 3: Serializing index to raw binary file..." << std::endl;
 
     FILE* out_bin = std::fopen(index_output_path.c_str(), "wb");
     if (!out_bin) {
-        std::cerr << "Fatal Error: Could not open binary output file " << index_output_path << "\n";
+        std::cerr << "Fatal Error: Could not open binary output file " << index_output_path << std::endl;
         return 1;
     }
 
@@ -289,10 +289,10 @@ int main(int argc, char* argv[]) {
 
     std::fclose(out_bin);
 
-    std::cout << "Indexing complete. Processed " << line_number << " lines. (" << N << " successful documents).\n";
-    std::cout << "Unique terms indexed: " << num_terms << "\n";
-    std::cout << "Global Postings length: " << gpost_size << " integers.\n";
-    std::cout << "Global Positions length: " << gpos_size << " integers.\n";
+    std::cout << "Indexing complete. Processed " << line_number << " lines. (" << N << " successful documents)." << std::endl;
+    std::cout << "Unique terms indexed: " << num_terms << std::endl;
+    std::cout << "Global Postings length: " << gpost_size << " integers." << std::endl;
+    std::cout << "Global Positions length: " << gpos_size << " integers." << std::endl;
 
     return 0;
 }
