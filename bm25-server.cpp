@@ -19,7 +19,7 @@ using json = nlohmann::json;
 
 // --- Global Read-Only State ---
 const double k1 = 1.2;
-const double b = 0.75;
+const double b = 0.2;
 const uint32_t INF_DOC = 0xFFFFFFFF;
 
 struct TermDictEntry {
