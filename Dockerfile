@@ -23,8 +23,8 @@ RUN g++ -O3 -std=c++2b -Wall -Wextra -Wpedantic -Wshadow bm25-indexer.cpp lib/li
     g++ -O3 -std=c++2b -Wall -Wextra -Wpedantic -Wshadow bm25-server.cpp lib/libstemmer.a -I include -o server -pthread
 
 # 3. Run the indexer inside the builder stage!
-# This bakes input.jsonl into docs.jsonl and index.jsonl
-RUN ./indexer -i input.jsonl -o1 docs.jsonl -o2 index.jsonl
+# This bakes input.jsonl into docs.jsonl and index.bin
+RUN ./indexer -i input.jsonl -o1 docs.jsonl -o2 index.bin
 
 
 # ==========================================
@@ -40,11 +40,11 @@ WORKDIR /app
 # Copy ONLY the compiled server and the required data files from the builder
 COPY --from=builder /app/server .
 COPY --from=builder /app/docs.jsonl .
-COPY --from=builder /app/index.jsonl .
+COPY --from=builder /app/index.bin .
 COPY --from=builder /app/lexisnexis_stopwords.txt .
 
 # Expose the port
 EXPOSE 8080
 
 # Run the server
-CMD ["./server", "-i1", "docs.jsonl", "-i2", "index.jsonl", "-p", "8080"]
+CMD ["./server", "-i1", "docs.jsonl", "-i2", "index.bin", "-p", "8080"]

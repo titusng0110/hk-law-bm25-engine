@@ -9,6 +9,7 @@
 #include <iterator>
 #include <algorithm>
 #include <utility>
+#include <memory>             // Added for std::unique_ptr
 
 // External libraries
 #include "utf8.h"             // utf8cpp
@@ -159,8 +160,17 @@ class Tokenizer {
 private:
     using FastSet = std::unordered_set<std::string, detail::StringHash, std::equal_to<>>;
 
+    // MODIFICATION 1: Custom Deleter for Unique Ptr
+    struct StemmerDeleter {
+        void operator()(sb_stemmer* s) const {
+            if (s) sb_stemmer_delete(s);
+        }
+    };
+
     FastSet stopwords;
-    struct sb_stemmer* stemmer = nullptr;
+
+    // MODIFICATION 2: Smart pointer replacing raw pointer
+    std::unique_ptr<sb_stemmer, StemmerDeleter> stemmer;
 
     // NOW TRACKING POSITIONS: std::pair<token_string, absolute_position>
     using PosToken = std::pair<std::string, uint32_t>;
@@ -188,7 +198,10 @@ private:
 public:
     explicit Tokenizer(std::string_view stopwords_path) {
         stopwords = load_set(stopwords_path);
-        stemmer = sb_stemmer_new("english", "UTF_8");
+
+        // MODIFICATION 3: Use .reset() to initialize the unique_ptr
+        stemmer.reset(sb_stemmer_new("english", "UTF_8"));
+
         if (!stemmer) {
             throw std::runtime_error("Failed to initialize Snowball stemmer");
         }
@@ -200,24 +213,14 @@ public:
         current_english_word.reserve(100);
     }
 
-    ~Tokenizer() {
-        if (stemmer) {
-            sb_stemmer_delete(stemmer);
-        }
-    }
+    // MODIFICATION 4: Destructor and Move Constructors are now defaulted safely
+    ~Tokenizer() = default;
 
     Tokenizer(const Tokenizer&) = delete;
     Tokenizer& operator=(const Tokenizer&) = delete;
 
-    Tokenizer(Tokenizer&& other) noexcept
-        : stopwords(std::move(other.stopwords)),
-          stemmer(other.stemmer),
-          raw_tokens(std::move(other.raw_tokens)),
-          phase2_tokens(std::move(other.phase2_tokens)),
-          phase3_tokens(std::move(other.phase3_tokens))
-    {
-        other.stemmer = nullptr;
-    }
+    Tokenizer(Tokenizer&& other) noexcept = default;
+    Tokenizer& operator=(Tokenizer&& other) noexcept = default;
 
     // Convenience wrapper returning the vector
     std::vector<std::pair<std::string, uint32_t>> tokenize(std::string_view text) {
@@ -255,8 +258,9 @@ public:
             }
 
             if (!is_stat_keyword && !is_citation) {
+                // MODIFICATION 5: Add .get() to pass the raw pointer to the C API
                 const sb_symbol* stemmed = sb_stemmer_stem(
-                    stemmer,
+                    stemmer.get(),
                     reinterpret_cast<const sb_symbol*>(current_english_word.c_str()),
                     current_english_word.length()
                 );
@@ -333,7 +337,7 @@ public:
             // 2. Alphanumerics
             if (detail::is_alnum(cp)) {
                 if (cp >= U'A' && cp <= U'Z') cp += 32;
-                current_english_word.push_back(static_cast<char>(cp));
+                current_english_word.push_back(static_cast<char>(cp)); // Note: changed static_castAssistant back to static_cast<char>
                 last_was_cjk = false;
             }
             // 3. Decimals

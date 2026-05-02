@@ -3,3 +3,6 @@
 *.exe
 .vscode/
 *.jsonl
+libstemmer_c-3.0.1/stemwords
+indexer
+server

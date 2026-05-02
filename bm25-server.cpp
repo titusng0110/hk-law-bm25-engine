@@ -279,9 +279,9 @@ int main(int argc, char* argv[]) {
                     return;
                 }
 
-                // WAND: Sort terms by IDF descending (Rarest first)
+                // ISSUE 4 FIX: WAND Strict MaxScore implementation requires sorting by max_score descending
                 std::sort(q_terms.begin(), q_terms.end(), [](const QueryTerm& lhs, const QueryTerm& rhs) {
-                    return lhs.idf > rhs.idf;
+                    return lhs.max_score > rhs.max_score;
                 });
 
                 // Compute prefix sum of max_scores for pruning

@@ -220,8 +220,15 @@ int main(int argc, char* argv[]) {
 
             // BM25 Score calculation
             double score = idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (static_cast<double>(D) / avgdl)));
-            if (score > max_score) {
-                max_score = score;
+
+            // ISSUE 3 FIX: Calculate a theoretical Max SDM Bonus and bake it into max_score.
+            // A term can be surrounded by 2 terms in a query (left and right adjacency).
+            // Each adjacency adds 1.0x to the base BM25 score.
+            // Thus, theoretical max contribution per term is 3.0x its base BM25 score.
+            double sdm_theoretical_max = score * 3.0;
+
+            if (sdm_theoretical_max > max_score) {
+                max_score = sdm_theoretical_max;
             }
 
             // Flatten into the giant postings array
