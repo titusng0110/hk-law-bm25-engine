@@ -2,7 +2,7 @@
 
 A high-performance, lightweight BM25 search engine written in C++23, designed specifically for **Hong Kong law and legal documents** (ordinances, case law, contracts, etc.).
 
-It consists of an offline **indexer** that builds an inverted index from JSON Lines (JSONL) data, and a fast HTTP **search server** that serves top-k queries using standard BM25 scoring.
+It consists of an offline **indexer** that builds an inverted index from JSON Lines (JSONL) data, and a fast HTTP **search server** that serves top-k queries.
 
 The engine features a highly specialized custom tokenizer built to handle the unique quirks of HK legal text, including English, CJK (Chinese, Japanese, Korean) characters, and **statutory texts** (capable of intelligently merging citations like `s.1`, `section 1`, `Cap. 4`, and bracketed structures like `(1)(a)` or `Sch 1`).
 
@@ -10,16 +10,15 @@ The engine features a highly specialized custom tokenizer built to handle the un
 
 * **Tailored for Legal Text**: Automatically detects and merges legal abbreviations, statutory citations, and bracketed references common in HK jurisprudence.
 * **Multilingual Support**: Seamlessly handles UTF-8 CJK text alongside English, perfect for bilingual HK legal documents.
-* **Advanced Tokenization**: Includes Snowball stemming, custom stopword filtering, accent flattening, and punctuation handling.
-* **Fast BM25 Scoring**: Precomputes Document Frequencies (DF) and loads a highly optimized in-memory inverted index.
+* **Advanced DAAT Evaluation**: Implements strict Document-at-a-Time (DAAT) MaxScore (WAND) pruning and galloping search to bypass irrelevant documents, enabling sub-millisecond query evaluation.
+* **Sequential Dependence Model (SDM)**: The tokenizer maintains strict positional tracking, allowing the server to automatically apply exact-phrase and unordered-window proximity bonuses to multi-term queries.
 * **Robust HTTP API**: Provides a fast, multithreaded REST endpoint (`/search`) for bulk querying via NDJSON (`application/x-ndjson`), featuring independent per-line validation and error handling.
 * **Docker Ready**: Includes a multi-stage Dockerfile that compiles the binaries, bakes the index, and outputs a minimal, production-ready Alpine container.
 
 ## Prerequisites
 
 * **Docker:** Just Docker! You don't need to install any C++ toolchains.
-* **Native Build:** A C++ compiler that supports **C++23** (e.g., GCC 12+ or Clang 14+) and `make`.
-  > **🪟 Windows Users:** We highly recommend downloading a modern GCC/MinGW-w64 build from [niXman/mingw-builds-binaries](https://github.com/niXman/mingw-builds-binaries/) to ensure proper C++23 support. Ensure `g++` and `mingw32-make` are added to your system's PATH.
+* **Native Build:** A C++ compiler that supports **C++23** (e.g., GCC 12+ or Clang 14+) and `make` on a Linux/macOS environment.
 
 **Everything else is already included!** All third-party headers, the Snowball stemmer source (`libstemmer_c-3.0.1`), and the LexisNexis stopwords file are bundled directly in this repository.
 
@@ -62,13 +61,6 @@ If you prefer to build and run the tools directly on your host machine, follow t
 ### 1. Build the Binaries
 The build scripts will automatically compile `libstemmer` into a static library (`libstemmer.a`), then compile the indexer and server.
 
-**Windows (MinGW):**
-Open your command prompt or terminal in the project directory and run:
-```cmd
-build.bat
-```
-
-**Linux:**
 Open your terminal in the project directory and run:
 ```bash
 chmod u+x build.sh
@@ -76,27 +68,17 @@ chmod u+x build.sh
 ```
 
 ### 2. Run the Indexer
-The indexer reads your raw data and generates a document store (`docs.jsonl`) and an inverted index (`index.jsonl`).
+The indexer reads your raw data and generates a document store (`docs.jsonl`) and an inverted binary index (`index.bin`).
 
-**Windows:**
-```cmd
-indexer.exe -i input.jsonl -o1 docs.jsonl -o2 index.jsonl
-```
-**Linux:**
 ```bash
-./indexer -i input.jsonl -o1 docs.jsonl -o2 index.jsonl
+./indexer -i input.jsonl -o1 docs.jsonl -o2 index.bin
 ```
 
 ### 3. Start the Server
 The server loads the generated index into memory and listens for incoming POST requests.
 
-**Windows:**
-```cmd
-server.exe -i1 docs.jsonl -i2 index.jsonl -p 8080
-```
-**Linux:**
 ```bash
-./server -i1 docs.jsonl -i2 index.jsonl -p 8080
+./server -i1 docs.jsonl -i2 index.bin -p 8080
 ```
 
 ---
