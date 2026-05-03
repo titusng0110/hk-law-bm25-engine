@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 // Ensure you have this library in your include path
 #include "nlohmann/json.hpp"
@@ -14,6 +15,19 @@
 
 using json = nlohmann::json;
 using ordered_json = nlohmann::ordered_json; // Preserve insertion order
+
+// --- Global Read-Only State ---
+const double k1 = 1.2;
+const double b = 0.2;
+
+const double BM25_IDF_SMOOTHING = 0.5;
+const double BM25_IDF_LOG_OFFSET = 1.0;
+const double BM25_TF_OFFSET = 1.0;
+const double BM25_DL_OFFSET = 1.0;
+
+const uint32_t POSTING_RECORD_SIZE = 4;
+
+const std::string STOPWORDS_FILE = "lexisnexis_stopwords.txt";
 
 void print_usage(const char* prog_name) {
     std::cerr << "Usage: " << prog_name << " -i input.jsonl -o1 docs.jsonl -o2 index.bin" << std::endl;
@@ -60,26 +74,26 @@ int main(int argc, char* argv[]) {
         } else {
             std::cerr << "Unknown or incomplete argument: " << arg << std::endl;
             print_usage(argv[0]);
-            return 1;
+            return EXIT_FAILURE;
         }
     }
 
     if (input_path.empty() || docs_output_path.empty() || index_output_path.empty()) {
         print_usage(argv[0]);
-        return 1;
+        return EXIT_FAILURE;
     }
 
     // 2. Open File Streams
     std::ifstream infile(input_path);
     if (!infile.is_open()) {
         std::cerr << "Error: Could not open input file " << input_path << std::endl;
-        return 1;
+        return EXIT_FAILURE;
     }
 
     std::ofstream outfile_docs(docs_output_path);
     if (!outfile_docs.is_open()) {
         std::cerr << "Error: Could not open docs output file " << docs_output_path << std::endl;
-        return 1;
+        return EXIT_FAILURE;
     }
 
     // 3. Flat Data-Oriented Containers
@@ -90,7 +104,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> id_to_term;
     std::unordered_map<uint32_t, uint32_t> doc_lengths;
 
-    bm25::Tokenizer tokenizer("lexisnexis_stopwords.txt");
+    bm25::Tokenizer tokenizer(STOPWORDS_FILE);
     std::vector<std::pair<std::string, uint32_t>> doc_tokens;
     std::vector<DocToken> current_doc_tokens;
 
@@ -140,9 +154,9 @@ int main(int argc, char* argv[]) {
 
             // Sort document tokens by Term ID, then chronologically by Position
             std::sort(current_doc_tokens.begin(), current_doc_tokens.end(),
-                      [](const DocToken& a, const DocToken& b) {
-                          if (a.term_id != b.term_id) return a.term_id < b.term_id;
-                          return a.pos < b.pos;
+                      [](const DocToken& lhs, const DocToken& rhs) {
+                          if (lhs.term_id != rhs.term_id) return lhs.term_id < rhs.term_id;
+                          return lhs.pos < rhs.pos;
                       });
 
             // Iterate contiguous blocks of term_ids to create temp_postings
@@ -184,17 +198,20 @@ int main(int argc, char* argv[]) {
 
     // Sort postings by term_id, then doc_id (Strict DAAT Architecture)
     std::sort(temp_postings.begin(), temp_postings.end(),
-              [](const TempPosting& a, const TempPosting& b) {
-                  if (a.term_id != b.term_id) return a.term_id < b.term_id;
-                  return a.doc_id < b.doc_id;
+              [](const TempPosting& lhs, const TempPosting& rhs) {
+                  if (lhs.term_id != rhs.term_id) return lhs.term_id < rhs.term_id;
+                  return lhs.doc_id < rhs.doc_id;
               });
 
     double avgdl = N > 0 ? static_cast<double>(total_length) / N : 0.0;
-    const double k1 = 1.2;
-    const double b = 0.75;
+
+    // FIX 1: Match the Server's 'b' parameter!
+    // The server uses 0.2. If the indexer uses 0.75, the max_score pruning bounds
+    // will be mathematically incorrect and drop valid documents.
+    // (Note: k1 and b have been moved to Global Read-Only State)
 
     std::vector<uint32_t> global_postings;
-    global_postings.reserve(temp_postings.size() * 4); // Format: [doc_id, tf, pos_offset, pos_length]
+    global_postings.reserve(temp_postings.size() * POSTING_RECORD_SIZE); // Format: [doc_id, tf, pos_offset, pos_length]
     std::vector<TermDictEntry> dictionary;
 
     auto it = temp_postings.begin();
@@ -210,7 +227,7 @@ int main(int argc, char* argv[]) {
         }
 
         // BM25 IDF using standard +0.5 smoothing (strictly positive formulation)
-        double idf = std::log(1.0 + (N - df + 0.5) / (df + 0.5));
+        double idf = std::log(BM25_IDF_LOG_OFFSET + (N - df + BM25_IDF_SMOOTHING) / (df + BM25_IDF_SMOOTHING));
         double max_score = 0.0;
         uint32_t posting_offset = global_postings.size();
 
@@ -219,16 +236,13 @@ int main(int argc, char* argv[]) {
             uint32_t D = doc_lengths[p->doc_id];
 
             // BM25 Score calculation
-            double score = idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (static_cast<double>(D) / avgdl)));
+            double score = idf * (tf * (k1 + BM25_TF_OFFSET)) / (tf + k1 * (BM25_DL_OFFSET - b + b * (static_cast<double>(D) / avgdl)));
 
-            // ISSUE 3 FIX: Calculate a theoretical Max SDM Bonus and bake it into max_score.
-            // A term can be surrounded by 2 terms in a query (left and right adjacency).
-            // Each adjacency adds 1.0x to the base BM25 score.
-            // Thus, theoretical max contribution per term is 3.0x its base BM25 score.
-            double sdm_theoretical_max = score * 3.0;
-
-            if (sdm_theoretical_max > max_score) {
-                max_score = sdm_theoretical_max;
+            // FIX 2: Removed the * 3.0 SDM multiplier.
+            // We now store the exact Base BM25 max score.
+            // SDM bonuses are applied safely during Phase 2 in the server.
+            if (score > max_score) {
+                max_score = score;
             }
 
             // Flatten into the giant postings array
@@ -257,7 +271,7 @@ int main(int argc, char* argv[]) {
     FILE* out_bin = std::fopen(index_output_path.c_str(), "wb");
     if (!out_bin) {
         std::cerr << "Fatal Error: Could not open binary output file " << index_output_path << std::endl;
-        return 1;
+        return EXIT_FAILURE;
     }
 
     // 1. Write Header Info (Critical for reconstructing BM25 at query time)
@@ -294,5 +308,5 @@ int main(int argc, char* argv[]) {
     std::cout << "Global Postings length: " << gpost_size << " integers." << std::endl;
     std::cout << "Global Positions length: " << gpos_size << " integers." << std::endl;
 
-    return 0;
+    return EXIT_SUCCESS;
 }
