@@ -40,6 +40,9 @@ const double BM25_DL_OFFSET = 1.0;
 
 const uint32_t NEXT_DOC_OFFSET = 1;
 
+const uint32_t MAXSCORE_PRUNE_CANDIDATE_K_MULTIPLIER = 50;
+const uint32_t MAXSCORE_PRUNE_CANDIDATE_K_LIMIT = 50000;
+
 const uint32_t SDM_WINDOW_SIZE = 8;
 const double SDM_EXACT_BONUS = 1.0;
 const double SDM_WINDOW_BONUS = 0.5;
@@ -64,12 +67,13 @@ uint32_t max_doc_id = 0;
 // --- Flat DAAT Query Structures ---
 
 struct QueryTerm {
-    uint32_t original_pos;
-    double idf;
-    double max_score;
-    uint32_t cursor;
-    uint32_t end_cursor;
-    uint32_t current_doc_id;
+    double idf;            // 8 bytes
+    double max_score;      // 8 bytes
+    uint32_t original_pos; // 4 bytes
+    uint32_t cursor;       // 4 bytes
+    uint32_t end_cursor;   // 4 bytes
+    uint32_t current_doc_id; // 4 bytes
+    // Total size in memory: 32 bytes (perfectly aligned)
 
     inline void advance(const uint32_t* postings) {
         cursor += POSTING_RECORD_SIZE; // Skip to next posting [doc_id, tf, pos_offset, pos_length]
@@ -267,6 +271,7 @@ int main(int argc, char* argv[]) {
                 json j_req = json::parse(req_line);
                 std::string query = j_req.at("query").get<std::string>();
                 size_t k = j_req.at("k").get<size_t>();
+                size_t candidate_k = std::max(k, std::min(k * MAXSCORE_PRUNE_CANDIDATE_K_MULTIPLIER, static_cast<size_t>(MAXSCORE_PRUNE_CANDIDATE_K_LIMIT)));
 
                 // Reset Thread-Local State
                 q_terms.clear();
@@ -335,7 +340,7 @@ int main(int argc, char* argv[]) {
 
                     for (size_t i = 0; i < q_terms.size(); ++i) {
                         // MaxScore Pruning Check
-                        if (doc_score + prefix_max_score[i] < (heap_min - EPSILON) && top_k_heap.size() == k) {
+                        if (doc_score + prefix_max_score[i] < (heap_min - EPSILON) && top_k_heap.size() == candidate_k) {
                             pruned = true;
                             break;
                         }
@@ -414,10 +419,10 @@ int main(int argc, char* argv[]) {
                     }
 
                     // --- 6. Top-K Min-Heap Insertion ---
-                    if (top_k_heap.size() < k) {
+                    if (top_k_heap.size() < candidate_k) {
                         top_k_heap.push_back({current_doc, doc_score});
                         std::push_heap(top_k_heap.begin(), top_k_heap.end(), heap_cmp);
-                        if (top_k_heap.size() == k) heap_min = top_k_heap.front().score;
+                        if (top_k_heap.size() == candidate_k) heap_min = top_k_heap.front().score;
                     } else if (doc_score > heap_min || (std::abs(doc_score - heap_min) < EPSILON && current_doc < top_k_heap.front().doc_id)) {
                         std::pop_heap(top_k_heap.begin(), top_k_heap.end(), heap_cmp);
                         top_k_heap.back() = {current_doc, doc_score};
@@ -427,10 +432,21 @@ int main(int argc, char* argv[]) {
                 }
 
                 // --- 7. Format JSON Response ---
-                std::sort(top_k_heap.begin(), top_k_heap.end(), [](const DocScore& lhs, const DocScore& rhs) {
+                // We want descending order: highest score first. Ties broken by smallest doc_id.
+                auto result_cmp = [](const DocScore& lhs, const DocScore& rhs) {
                     if (std::abs(lhs.score - rhs.score) < EPSILON) return lhs.doc_id < rhs.doc_id;
                     return lhs.score > rhs.score;
-                });
+                };
+
+                if (top_k_heap.size() > k) {
+                    // Only sort the top 'k' elements into the front of the vector
+                    std::partial_sort(top_k_heap.begin(), top_k_heap.begin() + k, top_k_heap.end(), result_cmp);
+                    // Discard the rest
+                    top_k_heap.resize(k);
+                } else {
+                    // If we somehow have fewer than or exactly 'k' results, just sort them all
+                    std::sort(top_k_heap.begin(), top_k_heap.end(), result_cmp);
+                }
 
                 json j_out = json::array();
                 for (const auto& result : top_k_heap) {
@@ -440,6 +456,7 @@ int main(int argc, char* argv[]) {
                     });
                 }
                 response_body += j_out.dump() + "\n";
+
 
             } catch (const std::exception& e) {
                 json j_error = {{"error", e.what()}};
